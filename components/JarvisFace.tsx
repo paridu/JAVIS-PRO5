@@ -11,9 +11,6 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
   const animationRef = useRef<number>();
   const timeRef = useRef<number>(0);
 
-  // Animation State Refs (kept in closure to persist across frames)
-  const blinkRef = useRef({ nextBlink: 2, isBlinking: false, progress: 0 });
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -50,8 +47,8 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
       timeRef.current += 0.015;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      let centerX = canvas.width / 2;
-      let centerY = canvas.height / 2;
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
 
       // --- VISUALIZATION DATA GATHERING ---
       let visuals = { volume: 0, bass: 0, mid: 0, treble: 0 };
@@ -64,48 +61,8 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
           visuals.mid = 0.1;
       }
 
-      // --- IDLE ANIMATION LOGIC (Drift & Blink) ---
-      let idleX = 0;
-      let idleY = 0;
-      let blinkScale = 1;
-
-      // Apply idle animations when not error or processing heavily
-      if (state === AgentState.IDLE || state === AgentState.LISTENING || state === AgentState.THINKING) {
-          // 1. Head Drift (Subtle organic movement)
-          // Perlin-ish motion using sine waves of different primes
-          idleX = Math.sin(timeRef.current * 0.4) * 5 + Math.sin(timeRef.current * 0.9) * 2;
-          idleY = Math.cos(timeRef.current * 0.3) * 5 + Math.sin(timeRef.current * 1.1) * 2;
-
-          // 2. Blinking (Randomized)
-          const blink = blinkRef.current;
-          
-          if (!blink.isBlinking && timeRef.current > blink.nextBlink) {
-              blink.isBlinking = true;
-              blink.progress = 0;
-          }
-
-          if (blink.isBlinking) {
-              blink.progress += 0.15; // Blink speed
-              // Blink curve: 1 -> 0.05 -> 1 (Vertical squash)
-              blinkScale = 1 - Math.sin(blink.progress) * 0.95; 
-
-              if (blink.progress >= Math.PI) {
-                  blink.isBlinking = false;
-                  blink.nextBlink = timeRef.current + 3 + Math.random() * 5; // Next blink in 3-8s
-                  blinkScale = 1; // Snap back
-              }
-          }
-      } else {
-          // Reset blink when active/speaking to avoid weird deformations
-          blinkRef.current.isBlinking = false;
-          blinkRef.current.nextBlink = timeRef.current + 2;
-      }
-
-      // Apply idle drift to center
-      centerX += idleX;
-      centerY += idleY;
-
       // --- NON-LINEAR RESPONSE CURVES (NOISE GATING) ---
+      // Apply cubic curves to make movement punchy. Low volume = very little movement. High volume = explosive movement.
       const vBass = Math.pow(visuals.bass, 2.5);   // Vowels / Jaw Drop
       const vMid = Math.pow(visuals.mid, 2.0);     // Tone
       const vTreble = Math.pow(visuals.treble, 3.0); // Sibilance / Teeth
@@ -113,6 +70,7 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
       // --- COLOR & STATE LOGIC ---
       let primaryColor = '251, 191, 36'; // Gold
       let secondaryColor = '245, 158, 11';
+      let stateScale = 1;
       
       if (state === AgentState.LISTENING) {
         primaryColor = '34, 211, 238'; // Cyan
@@ -130,9 +88,7 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
 
       // --- MOUTH SHAPE DEFORMATION (SQUASH & STRETCH) ---
       // Bass (O, A sounds) -> Vertical stretch (ScaleY > 1)
-      // Multiplied by blinkScale for the blinking animation
-      const verticalStretch = (1 + (vBass * 1.5)) * blinkScale; 
-      
+      const verticalStretch = 1 + (vBass * 1.5); 
       // Treble (S, T sounds) -> Horizontal shake/widen
       const horizontalShake = Math.sin(timeRef.current * 50) * vTreble * 0.1;
       const horizontalStretch = 1 + (vTreble * 0.2) - (vBass * 0.3) + horizontalShake;
@@ -149,16 +105,22 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
         const idleWave = Math.sin(p.angle * 4 + timeRef.current) * 5;
         
         // --- REACTIVE DISPLACEMENT ---
+        // 1. Expansion: Particles push out based on total volume
         const expansion = vMid * 40;
+
+        // 2. Jitter: High frequency shake for consonants (Treble)
         const jitter = (Math.random() - 0.5) * vTreble * 25;
 
+        // 3. Radius calculation
         let r = p.baseRadius + idleWave + expansion + jitter;
         
+        // Agent Mode: Intense lightning spikes
         if (state === AgentState.AGENT_PROCESSING) {
             r += (Math.random() > 0.9 ? 40 : 0);
         }
 
         // --- COORDINATE TRANSFORMATION ---
+        // Apply elliptical squash/stretch relative to center
         let x = centerX + (Math.cos(p.angle) * r * horizontalStretch);
         let y = centerY + (Math.sin(p.angle) * r * verticalStretch);
 
@@ -167,32 +129,36 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
         p.y = y;
 
         // Draw Point
-        // Add subtle twinkle in idle to keep it alive
-        const idleTwinkle = state === AgentState.IDLE ? Math.sin(p.life * 3) * 0.2 : 0;
-        const alpha = 0.3 + (Math.sin(p.life) * 0.2) + (vMid * 0.5) + idleTwinkle;
-        
-        ctx.fillStyle = `rgba(${primaryColor}, ${Math.min(1, Math.max(0, alpha))})`;
+        const alpha = 0.3 + (Math.sin(p.life) * 0.2) + (vMid * 0.5); // Brighter when loud
+        ctx.fillStyle = `rgba(${primaryColor}, ${Math.min(1, alpha)})`;
         ctx.beginPath();
         ctx.arc(x, y, 1.5 + (vBass * 2), 0, Math.PI * 2);
         ctx.fill();
 
         // --- CONNECTING LINES (PLEXUS EFFECT) ---
+        // Only connect if close enough. 
+        // We optimize by checking only a subset of neighbors or relying on the loop order (since they are sorted by angle)
+        // Since they are ordered by angle, p[i] is close to p[i+1]
+        
+        // Connect to next few neighbors
         for (let j = 1; j <= 4; j++) {
             const neighborIdx = (i + j) % particleCount;
             const p2 = particles[neighborIdx];
 
+            // Distance check
             const dx = x - p2.x;
             const dy = y - p2.y;
             const distSq = dx*dx + dy*dy;
             
-            const threshold = 1600 + (vBass * 3000); 
+            // Dynamic threshold: Connect further when loud (Bass)
+            const threshold = 1600 + (vBass * 3000); // 40px^2 -> ~60px^2
 
             if (distSq < threshold) {
                 const dist = Math.sqrt(distSq);
                 const lineAlpha = (1 - dist/Math.sqrt(threshold)) * 0.4;
                 
                 ctx.strokeStyle = `rgba(${secondaryColor}, ${lineAlpha})`;
-                ctx.lineWidth = 0.5 + (vTreble * 1); 
+                ctx.lineWidth = 0.5 + (vTreble * 1); // Thicker lines on consonants
                 ctx.beginPath();
                 ctx.moveTo(x, y);
                 ctx.lineTo(p2.x, p2.y);
@@ -202,13 +168,10 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
       });
 
       // --- INNER CORE (The Speaker) ---
-      // Draw core if speaking OR idle (fainter in idle)
-      if (visuals.volume > 0.01 || state === AgentState.LISTENING || state === AgentState.IDLE) {
-          const baseCoreSize = state === AgentState.IDLE ? 15 : 20;
-          const baseCoreAlpha = state === AgentState.IDLE ? 0.05 : 0.1;
-
-          const coreRadius = baseCoreSize + (vBass * 50);
-          const coreAlpha = baseCoreAlpha + (vBass * 0.4);
+      // A central glow that represents the "throat" or source of energy
+      if (visuals.volume > 0.01 || state === AgentState.LISTENING) {
+          const coreRadius = 20 + (vBass * 50);
+          const coreAlpha = 0.1 + (vBass * 0.4);
           
           const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, coreRadius * 2);
           gradient.addColorStop(0, `rgba(${primaryColor}, ${coreAlpha})`);
@@ -216,6 +179,7 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
           
           ctx.fillStyle = gradient;
           ctx.beginPath();
+          // The core also stretches vertically
           ctx.ellipse(centerX, centerY, coreRadius * horizontalStretch, coreRadius * verticalStretch, 0, 0, Math.PI * 2);
           ctx.fill();
       }
