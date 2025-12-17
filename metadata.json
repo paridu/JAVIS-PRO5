@@ -1,0 +1,8 @@
+{
+  "name": "JARVIS Pro3",
+  "description": "A Stark Industries-grade AI assistant with real-time energy face visualization and lip-sync.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
