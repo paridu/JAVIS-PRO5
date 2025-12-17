@@ -1,30 +1,33 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import JarvisFace from '../components/JarvisFace';
 import { liveService } from '../services/liveService';
 import { geminiService } from '../services/geminiService';
-import { memoryService } from '../services/memoryService'; // Import Memory Service
+import { memoryService } from '../services/memoryService'; 
 import { AgentState, ToolCallData, NoteType } from '../types';
+import { JARVIS_PERSONA } from '../constants';
 
 const Assistant: React.FC = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [state, setState] = useState<AgentState>(AgentState.IDLE);
-  const [lastTranscript, setLastTranscript] = useState<string>("SYSTEM STANDBY");
+  const [lastTranscript, setLastTranscript] = useState<string>("SYSTEM INITIALIZING...");
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [roboticsData, setRoboticsData] = useState<any>(null);
   const [agentReport, setAgentReport] = useState<string | null>(null);
   const [faceData, setFaceData] = useState<any>(null);
   const [isFaceLocked, setIsFaceLocked] = useState(false);
   const [isVideoActive, setIsVideoActive] = useState(false);
+  const [isLogging, setIsLogging] = useState(false); 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [liveVolume, setLiveVolume] = useState(0);
   const [isMirrored, setIsMirrored] = useState(true); 
   const [showControls, setShowControls] = useState(false);
   const [activeFeature, setActiveFeature] = useState<string | null>(null);
 
-  // Refs for tracking state inside callbacks without triggering effects
+  // Refs for tracking state inside callbacks
   const stateRef = useRef(state);
   const isInitializedRef = useRef(isInitialized);
+  // Track if the user explicitly stopped the system, to prevent auto-reconnect loops
+  const isExplicitShutdownRef = useRef(false);
 
   // Hardware Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -38,14 +41,35 @@ const Assistant: React.FC = () => {
 
   // Determine Active Feature Label for HUD
   useEffect(() => {
-    if (state === AgentState.AGENT_PROCESSING) setActiveFeature("LIGHTNING AGENT");
+    if (isLogging) setActiveFeature("MEMORY WRITE PROTOCOL");
+    else if (state === AgentState.AGENT_PROCESSING) setActiveFeature("LIGHTNING AGENT");
     else if (state === AgentState.THINKING) setActiveFeature("NEURAL PROCESSING");
     else if (isFaceLocked) setActiveFeature("BIOMETRIC TRACKING");
     else if (generatedImage) setActiveFeature("VISUAL SYNTHESIS");
     else if (roboticsData) setActiveFeature("ENVIRONMENTAL SENSORS");
     else if (state === AgentState.ERROR) setActiveFeature("SYSTEM ERROR");
     else setActiveFeature(null);
-  }, [state, isFaceLocked, generatedImage, roboticsData]);
+  }, [state, isFaceLocked, generatedImage, roboticsData, isLogging]);
+
+  // --- Auto-Launch & Audio Resume ---
+  useEffect(() => {
+    // 1. Auto Start System on Mount
+    handleSystemStart();
+
+    // 2. Global listener to wake up AudioContext if browser blocks autoplay
+    const resumeAudio = () => {
+        liveService.resumeAudio();
+    };
+    window.addEventListener('click', resumeAudio);
+    window.addEventListener('touchstart', resumeAudio);
+    
+    return () => {
+        window.removeEventListener('click', resumeAudio);
+        window.removeEventListener('touchstart', resumeAudio);
+        stopVideo();
+        liveService.disconnect();
+    };
+  }, []);
 
   // --- Helper to grab current frame ---
   const getCurrentFrame = (): string | null => {
@@ -68,14 +92,33 @@ const Assistant: React.FC = () => {
       const mode = facingModeRef.current;
       console.log("Starting video with mode:", mode);
       
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-              facingMode: mode,
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-          } 
-      });
+      let stream: MediaStream | null = null;
+
+      try {
+        // Attempt 1: Ideal Configuration
+        stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                facingMode: mode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            } 
+        });
+      } catch (e) {
+         console.warn("High-res video constraints failed, trying fallback...", e);
+         try {
+            // Attempt 2: Basic Video
+            stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: mode } 
+            });
+         } catch (e2) {
+             console.warn("Specific facing mode failed, trying any camera...", e2);
+             // Attempt 3: Any Video Source
+             stream = await navigator.mediaDevices.getUserMedia({ video: true });
+         }
+      }
       
+      if (!stream) throw new Error("Could not acquire video stream");
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.play().catch(e => console.log("Video playback handled:", e.message));
@@ -92,6 +135,7 @@ const Assistant: React.FC = () => {
       console.error("Camera Error", e);
       let msg = "VISUAL SENSORS OFFLINE";
       if (e.name === 'NotAllowedError') msg = "VISUAL ACCESS DENIED";
+      else if (e.name === 'NotFoundError') msg = "NO CAMERA DETECTED";
       setLastTranscript(msg);
       setIsVideoActive(false);
     }
@@ -134,11 +178,19 @@ const Assistant: React.FC = () => {
   useEffect(() => {
     // Setup Live Service Handlers (Run once on mount)
     liveService.onStateChange = (isActive) => {
-      if (!isActive && isInitializedRef.current) {
-          if (stateRef.current !== AgentState.IDLE) {
-              setState(AgentState.ERROR);
-              setLastTranscript("CONNECTION LOST");
+      if (!isActive) {
+          if (isInitializedRef.current && !isExplicitShutdownRef.current) {
+              // AUTO-RECONNECT LOGIC
+              // If initialized but connection dropped (and not manually stopped)
+              console.log("Connection lost unexpectedly. Attempting reconnect...");
+              setLastTranscript("CONNECTION LOST - REROUTING...");
+              setState(AgentState.CONNECTING);
+              
+              setTimeout(() => {
+                  handleSystemStart();
+              }, 2000);
           } else {
+              // Normal shutdown
               setState(AgentState.IDLE);
           }
       }
@@ -147,8 +199,13 @@ const Assistant: React.FC = () => {
     liveService.onError = (error) => {
         setLastTranscript(`ERROR: ${error.message}`);
         setState(AgentState.ERROR);
+        
+        // Retry logic on error too, if not explicit shutdown
         setTimeout(() => {
-            if (stateRef.current === AgentState.ERROR) {
+            if (stateRef.current === AgentState.ERROR && !isExplicitShutdownRef.current) {
+                setLastTranscript("ATTEMPTING SYSTEM RECOVERY...");
+                handleSystemStart();
+            } else if (stateRef.current === AgentState.ERROR) {
                 setState(AgentState.IDLE);
                 setLastTranscript("SYSTEM STANDBY");
             }
@@ -201,8 +258,10 @@ const Assistant: React.FC = () => {
               }
 
               case 'log_developer_note': {
+                  setIsLogging(true);
                   memoryService.saveNote(tool.args.content, tool.args.category as NoteType);
-                  setLastTranscript(`${tool.args.category}: LOGGED TO MEMORY`);
+                  setLastTranscript(`LOG SAVED: ${tool.args.category}`);
+                  setTimeout(() => setIsLogging(false), 2500);
                   return { result: "Note saved to memory core" };
               }
 
@@ -220,12 +279,26 @@ const Assistant: React.FC = () => {
                    const frame = getCurrentFrame();
                    if (!frame) return { error: "No video feed available" };
 
-                   setLastTranscript("ANALYZING TARGET...");
-                   const json = await geminiService.analyzeFace(frame);
-                   setFaceData(json);
-                   memoryService.saveFace(json);
-                   setIsFaceLocked(true);
-                   return { result: "Face analysis complete", data: json };
+                   setLastTranscript("TARGET ACQUIRED. ANALYZING...");
+                   
+                   // UI: Lock tracking immediately to show scanning state
+                   setIsFaceLocked(true); 
+                   setFaceData(null); 
+
+                   try {
+                       const json = await geminiService.analyzeFace(frame);
+                       
+                       if (json.error) throw new Error(json.error);
+
+                       setFaceData(json);
+                       memoryService.saveFace(json);
+                       setLastTranscript(`IDENTITY CONFIRMED: ${json.identity_guess || "UNKNOWN"}`);
+                       return { result: "Face analysis complete", data: json };
+                   } catch (e) {
+                       setIsFaceLocked(false);
+                       setLastTranscript("ANALYSIS FAILED");
+                       return { error: "Face analysis failed" };
+                   }
               }
 
               case 'lightning_agent': {
@@ -246,39 +319,47 @@ const Assistant: React.FC = () => {
           return { error: `Execution failed: ${e.message}` };
       }
     };
-
-    return () => {
-      stopVideo();
-      liveService.disconnect();
-    };
   }, []); 
 
   // --- System Controls ---
   
   const handleSystemStart = async () => {
-    setLastTranscript("INITIALIZING PROTOCOLS...");
+    isExplicitShutdownRef.current = false; // Mark as intended start
+
+    // Don't re-init if already initialized (though useEffect empty dep array prevents this)
+    if (isInitializedRef.current && stateRef.current !== AgentState.ERROR && stateRef.current !== AgentState.CONNECTING) return;
+
+    setLastTranscript("ESTABLISHING SECURE CONNECTION...");
     try {
         setState(AgentState.CONNECTING);
         try {
+            // Request permissions early
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
             stream.getTracks().forEach(t => t.stop());
         } catch (e: any) {
-             console.warn("Permission pre-check failed", e);
+             console.warn("Permission pre-check failed (might be expected)", e);
         }
         await liveService.connect();
         setIsInitialized(true);
-        await startVideo();
+        // Only start video if it wasn't already active to prevent flickers
+        if (!isVideoActive) await startVideo();
+        
         setState(AgentState.IDLE);
         setLastTranscript("SYSTEM ONLINE - LISTENING");
     } catch (e: any) {
         console.error("Init Error", e);
         setState(AgentState.ERROR);
         setLastTranscript(e.message || "INITIALIZATION FAILED");
-        setTimeout(() => { setIsInitialized(false); setState(AgentState.IDLE); }, 3000);
+        // Retry logic is now handled in onError or onStateChange if they fire, 
+        // but if init throws immediately:
+        setTimeout(() => {
+             if (!isExplicitShutdownRef.current) handleSystemStart();
+        }, 5000);
     }
   };
 
   const handleShutdown = () => {
+    isExplicitShutdownRef.current = true; // Prevents auto-reconnect
     liveService.disconnect();
     stopVideo();
     setIsInitialized(false);
@@ -288,27 +369,6 @@ const Assistant: React.FC = () => {
   };
 
   // --- Render ---
-
-  if (!isInitialized) {
-      return (
-          <div className="h-full flex flex-col items-center justify-center relative overflow-hidden text-center z-50">
-               <div className="absolute inset-0 scanline opacity-20"></div>
-               <button 
-                  onClick={handleSystemStart}
-                  className="w-64 h-64 border-4 border-stark-800 rounded-full flex items-center justify-center relative mb-8 group transition-all hover:border-stark-gold hover:shadow-[0_0_50px_rgba(251,191,36,0.3)] bg-stark-900"
-               >
-                  <div className="absolute inset-0 rounded-full border border-stark-500 opacity-20 animate-ping"></div>
-                  <div className="absolute inset-2 rounded-full border border-dashed border-stark-500/50 animate-spin-slow"></div>
-                  <div className="text-2xl font-bold text-stark-500 group-hover:text-stark-gold tracking-widest transition-colors">
-                      START<br/>SYSTEM
-                  </div>
-               </button>
-               <p className="text-stark-500 font-mono text-sm tracking-[0.2em] animate-pulse">
-                  {lastTranscript === "SYSTEM STANDBY" ? "TOUCH TO INITIALIZE" : lastTranscript}
-               </p>
-          </div>
-      );
-  }
 
   return (
     <div className="h-full flex flex-col relative overflow-hidden">
@@ -344,22 +404,26 @@ const Assistant: React.FC = () => {
       {isFaceLocked && (
           <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
               <div className={`relative w-[80vw] max-w-[500px] aspect-square transition-all duration-500 ${faceData ? 'border-green-500' : 'border-red-500'}`}>
+                   {/* Reticle Corners */}
                    <div className={`absolute top-0 left-0 w-8 h-8 md:w-12 md:h-12 border-t-[4px] md:border-t-[6px] border-l-[4px] md:border-l-[6px] ${faceData ? 'border-green-500' : 'border-red-500'}`}></div>
                    <div className={`absolute top-0 right-0 w-8 h-8 md:w-12 md:h-12 border-t-[4px] md:border-t-[6px] border-r-[4px] md:border-r-[6px] ${faceData ? 'border-green-500' : 'border-red-500'}`}></div>
                    <div className={`absolute bottom-0 left-0 w-8 h-8 md:w-12 md:h-12 border-b-[4px] md:border-b-[6px] border-l-[4px] md:border-l-[6px] ${faceData ? 'border-green-500' : 'border-red-500'}`}></div>
                    <div className={`absolute bottom-0 right-0 w-8 h-8 md:w-12 md:h-12 border-b-[4px] md:border-b-[6px] border-r-[4px] md:border-r-[6px] ${faceData ? 'border-green-500' : 'border-red-500'}`}></div>
                    
+                   {/* Center Target */}
                    <div className={`absolute inset-0 flex items-center justify-center opacity-50`}>
                        <div className="w-6 h-6 bg-transparent border border-stark-gold rounded-full"></div>
                        <div className="absolute w-full h-[1px] bg-stark-gold/20"></div>
                        <div className="absolute h-full w-[1px] bg-stark-gold/20"></div>
                    </div>
 
+                   {/* Scanning Animation (Only when locked but no data yet) */}
                    {!faceData && (
                        <div className="absolute inset-0 border-t-4 border-red-500/50 animate-scan"></div>
                    )}
               </div>
 
+              {/* Data Card (Appears after analysis) */}
               {faceData && (
                   <div className="absolute left-1/2 bottom-20 md:bottom-auto md:left-[calc(50%+160px)] md:top-1/2 -translate-x-1/2 md:translate-x-0 md:-translate-y-1/2 w-64 bg-black/80 border-2 border-green-500/50 p-4 text-sm font-mono text-green-400 backdrop-blur-md rounded-lg shadow-[0_0_20px_rgba(0,255,0,0.2)] z-30 pointer-events-auto">
                       <h3 className="border-b border-green-500/30 mb-2 font-bold tracking-widest text-white">TARGET LOCKED</h3>
@@ -384,7 +448,7 @@ const Assistant: React.FC = () => {
                <div className="absolute bottom-0 bg-black/80 w-full text-center text-xs text-stark-gold py-1">CLICK TO DISMISS</div>
              </div>
           ) : (
-             <JarvisFace state={state} />
+             <JarvisFace state={state} tone={JARVIS_PERSONA.tone} />
           )}
         </div>
 

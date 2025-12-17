@@ -68,7 +68,7 @@ const TOOLS: FunctionDeclaration[] = [
 ];
 
 class LiveService {
-  private client: GoogleGenAI;
+  private client: GoogleGenAI | null = null;
   private sessionPromise: Promise<any> | null = null;
   private audioContext: AudioContext | null = null;
   private inputSource: MediaStreamAudioSourceNode | null = null;
@@ -92,11 +92,23 @@ class LiveService {
   public onError: ((error: Error) => void) | null = null;
 
   constructor() {
-    this.client = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Client initialized in connect()
   }
 
   public setMuted(muted: boolean) {
     this.isMuted = muted;
+  }
+
+  // Allow waking up audio context if browser auto-suspends it
+  public async resumeAudio() {
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      try {
+        await this.audioContext.resume();
+        console.log("AudioContext Resumed");
+      } catch (e) {
+        console.error("Failed to resume audio context", e);
+      }
+    }
   }
 
   private mapError(e: any, context: string): Error {
@@ -115,12 +127,18 @@ class LiveService {
 
   public async connect() {
     try {
+      if (!process.env.API_KEY) {
+          throw new Error("MISSING AUTHENTICATION KEY");
+      }
+
+      this.client = new GoogleGenAI({ apiKey: process.env.API_KEY });
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
       // Setup Analyser for Lip Sync
       this.outputAnalyser = this.audioContext.createAnalyser();
-      this.outputAnalyser.fftSize = 1024; // Increased resolution for better bass/treble separation
-      this.outputAnalyser.smoothingTimeConstant = 0.04; // Extremely low smoothing for high responsiveness
+      this.outputAnalyser.fftSize = 1024; 
+      // CRITICAL: Set smoothing to 0 to allow UI to handle physics/decay
+      this.outputAnalyser.smoothingTimeConstant = 0; 
       this.outputDataArray = new Uint8Array(this.outputAnalyser.frequencyBinCount);
 
       this.outputNode = this.audioContext.createGain();
@@ -166,6 +184,7 @@ class LiveService {
         },
       };
 
+      if (!this.client) throw new Error("Client initialization failed");
       this.sessionPromise = this.client.live.connect(config);
       if (this.onStateChange) this.onStateChange(true);
     } catch (e: any) {
@@ -292,14 +311,14 @@ class LiveService {
     this.inputSource?.disconnect();
     this.processor?.disconnect();
     this.clearAudioQueue();
-    if (this.onStateChange) this.onStateChange(false);
+    // Ensure all references are cleared so re-connect works cleanly
     this.sessionPromise = null;
+    this.client = null;
+    
+    // Notify State
+    if (this.onStateChange) this.onStateChange(false);
   }
 
-  /**
-   * GRANULAR VISUALIZATION ENGINE
-   * Maps frequency bins to specific phoneme drivers.
-   */
   public getVoiceVisuals() {
     if (!this.outputAnalyser || !this.outputDataArray || !this.audioContext) {
         return { volume: 0, bass: 0, mid: 0, treble: 0 };

@@ -4,12 +4,21 @@ import { liveService } from '../services/liveService';
 
 interface JarvisFaceProps {
   state: AgentState;
+  tone?: 'calm' | 'alert' | 'empathic';
 }
 
-const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
+const JarvisFace: React.FC<JarvisFaceProps> = ({ state, tone = 'calm' }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
   const timeRef = useRef<number>(0);
+  
+  // Physics State for Smoothing (Previous Frame Values)
+  const physicsRef = useRef({
+      bass: 0,
+      mid: 0,
+      treble: 0,
+      volume: 0
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -26,22 +35,24 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
     resize();
 
     // Particle System
-    const particleCount = 200;
-    const particles: { x: number; y: number; angle: number; baseRadius: number; speed: number; life: number; phase: number }[] = [];
+    const particleCount = 180;
+    const particles: { x: number; y: number; angle: number; baseRadius: number; speed: number; life: number; offset: number }[] = [];
 
     // Initialize particles
     for (let i = 0; i < particleCount; i++) {
-      const baseRadius = 60 + Math.random() * 60;
       particles.push({
         x: 0, 
         y: 0,
-        angle: (Math.PI * 2 * i) / particleCount, // Even distribution
-        baseRadius: baseRadius,
+        angle: (Math.PI * 2 * i) / particleCount, 
+        baseRadius: 60 + Math.random() * 40,
         speed: 0.002 + Math.random() * 0.005,
         life: Math.random() * Math.PI * 2,
-        phase: Math.random() * Math.PI * 2
+        offset: Math.random() * 100
       });
     }
+
+    // Helper: Linear Interpolation for Smooth Physics
+    const lerp = (start: number, end: number, factor: number) => start + (end - start) * factor;
 
     const render = () => {
       timeRef.current += 0.015;
@@ -50,137 +61,149 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
       const centerX = canvas.width / 2;
       const centerY = canvas.height / 2;
 
-      // --- VISUALIZATION DATA GATHERING ---
-      let visuals = { volume: 0, bass: 0, mid: 0, treble: 0 };
-      
+      // --- 1. GATHER RAW DATA ---
+      let rawVisuals = { volume: 0, bass: 0, mid: 0, treble: 0 };
       if (state === AgentState.SPEAKING) {
-          visuals = liveService.getVoiceVisuals();
+          rawVisuals = liveService.getVoiceVisuals();
       } else if (state === AgentState.LISTENING) {
-          // Slow breathing pulse
-          visuals.bass = 0.15 + Math.sin(timeRef.current * 2) * 0.05;
-          visuals.mid = 0.1;
+          // Idle breathing
+          rawVisuals.bass = 0.2 + Math.sin(timeRef.current * 2) * 0.05;
+          rawVisuals.mid = 0.1;
       }
 
-      // --- NON-LINEAR RESPONSE CURVES (NOISE GATING) ---
-      // Apply cubic curves to make movement punchy. Low volume = very little movement. High volume = explosive movement.
-      const vBass = Math.pow(visuals.bass, 2.5);   // Vowels / Jaw Drop
-      const vMid = Math.pow(visuals.mid, 2.0);     // Tone
-      const vTreble = Math.pow(visuals.treble, 3.0); // Sibilance / Teeth
+      // --- 2. EMOTION DYNAMICS CONFIG ---
+      let smoothFactor = 0.2; // Default
+      let tension = 1.0;
+      let jitterMult = 1.0;
+      let expansionMult = 1.0;
 
-      // --- COLOR & STATE LOGIC ---
-      let primaryColor = '251, 191, 36'; // Gold
-      let secondaryColor = '245, 158, 11';
-      let stateScale = 1;
-      
+      // Color Palette
+      let r = 251, g = 191, b = 36; // Gold (Default)
+
       if (state === AgentState.LISTENING) {
-        primaryColor = '34, 211, 238'; // Cyan
-        secondaryColor = '6, 182, 212';
-      } else if (state === AgentState.THINKING) {
-        primaryColor = '168, 85, 247'; // Purple
-        secondaryColor = '147, 51, 234';
+          r = 34; g = 211; b = 238; // Cyan
+          smoothFactor = 0.05; // Very slow breathing
       } else if (state === AgentState.ERROR) {
-        primaryColor = '239, 68, 68'; // Red
-        secondaryColor = '185, 28, 28';
-      } else if (state === AgentState.AGENT_PROCESSING) {
-        primaryColor = '255, 255, 255'; // White/Blue lightning
-        secondaryColor = '59, 130, 246';
+          r = 239; g = 68; b = 68; // Red
+          jitterMult = 3.0;
+          tension = 2.0;
+      } else if (state === AgentState.THINKING || state === AgentState.AGENT_PROCESSING) {
+          r = 168; g = 85; b = 247; // Purple
+          smoothFactor = 0.1;
+      } else {
+          // SPEAKING - Apply Tone Modifiers
+          switch (tone) {
+              case 'calm':
+                  smoothFactor = 0.15; // Silky smooth
+                  tension = 0.8;       // Relaxed
+                  expansionMult = 0.8; // Gentle
+                  break;
+              case 'alert':
+                  smoothFactor = 0.4;  // Snappy
+                  tension = 1.5;       // Taut
+                  jitterMult = 2.0;    // Energetic
+                  r = 245; g = 158; b = 11; // Darker Amber
+                  break;
+              case 'empathic':
+                  smoothFactor = 0.25; // Balanced
+                  tension = 0.6;       // Soft/Round
+                  expansionMult = 1.2; // Expressive
+                  r = 255; g = 200; b = 100; // Warm Gold
+                  break;
+          }
       }
 
-      // --- MOUTH SHAPE DEFORMATION (SQUASH & STRETCH) ---
-      // Bass (O, A sounds) -> Vertical stretch (ScaleY > 1)
-      const verticalStretch = 1 + (vBass * 1.5); 
-      // Treble (S, T sounds) -> Horizontal shake/widen
-      const horizontalShake = Math.sin(timeRef.current * 50) * vTreble * 0.1;
-      const horizontalStretch = 1 + (vTreble * 0.2) - (vBass * 0.3) + horizontalShake;
+      // --- 3. PHYSICS SMOOTHING (The "Organic" Feel) ---
+      physicsRef.current.bass = lerp(physicsRef.current.bass, rawVisuals.bass, smoothFactor);
+      physicsRef.current.mid = lerp(physicsRef.current.mid, rawVisuals.mid, smoothFactor);
+      physicsRef.current.treble = lerp(physicsRef.current.treble, rawVisuals.treble, smoothFactor * 1.5); // Treble moves faster
+      physicsRef.current.volume = lerp(physicsRef.current.volume, rawVisuals.volume, smoothFactor);
 
-      // --- RENDER PARTICLES ---
-      ctx.globalCompositeOperation = 'screen'; // Glowing effect
+      const v = physicsRef.current; // Shorthand
+
+      // --- 4. SHAPE DEFORMATION MATH ---
+      // Bass -> Vertical Opening (Jaw)
+      // Treble -> Horizontal Widening + High Frequency Noise (Teeth/Lips)
+      
+      const verticalStretch = 1 + (v.bass * 2.5 * expansionMult); 
+      // Treble shakes the width rapidly (Sibilance)
+      const horizontalShake = Math.sin(timeRef.current * 40) * (v.treble * 0.3 * jitterMult); 
+      const horizontalStretch = 1 + (v.treble * 0.5 * expansionMult) - (v.bass * 0.2) + horizontalShake;
+
+      // Rotation speed based on energy
+      const rotationSpeed = (state === AgentState.SPEAKING ? 0.005 : 0.002) * (1 + v.volume * 2);
+
+      // --- 5. RENDER PARTICLES ---
+      ctx.globalCompositeOperation = 'screen'; 
 
       particles.forEach((p, i) => {
-        // Orbit
-        p.angle += p.speed;
-        p.life += 0.05;
-
-        // Base idle motion
-        const idleWave = Math.sin(p.angle * 4 + timeRef.current) * 5;
+        // Update Angle
+        p.angle += rotationSpeed * (i % 2 === 0 ? 1 : -1); // Alternating rings
         
-        // --- REACTIVE DISPLACEMENT ---
-        // 1. Expansion: Particles push out based on total volume
-        const expansion = vMid * 40;
-
-        // 2. Jitter: High frequency shake for consonants (Treble)
-        const jitter = (Math.random() - 0.5) * vTreble * 25;
-
-        // 3. Radius calculation
-        let r = p.baseRadius + idleWave + expansion + jitter;
+        // Dynamic Radius
+        // "Breathing" base + Audio Energy pushing out
+        let r_dynamic = p.baseRadius + (Math.sin(timeRef.current + p.offset) * 5);
         
-        // Agent Mode: Intense lightning spikes
-        if (state === AgentState.AGENT_PROCESSING) {
-            r += (Math.random() > 0.9 ? 40 : 0);
+        // Explosion from Mid-tones (Voice fundamental)
+        r_dynamic += (v.mid * 60 * expansionMult);
+
+        // Jitter from Treble (Consonants)
+        if (v.treble > 0.1) {
+             r_dynamic += (Math.random() - 0.5) * (v.treble * 30 * jitterMult);
         }
 
-        // --- COORDINATE TRANSFORMATION ---
-        // Apply elliptical squash/stretch relative to center
-        let x = centerX + (Math.cos(p.angle) * r * horizontalStretch);
-        let y = centerY + (Math.sin(p.angle) * r * verticalStretch);
+        // Apply Elliptical Distortion (The "Mouth" Shape)
+        // We dampen the stretching for outer particles to keep it looking cohesive
+        const stretchDampen = 1; 
+        const x = centerX + (Math.cos(p.angle) * r_dynamic * (horizontalStretch * stretchDampen));
+        const y = centerY + (Math.sin(p.angle) * r_dynamic * (verticalStretch * stretchDampen));
 
-        // Update particle
-        p.x = x;
-        p.y = y;
-
-        // Draw Point
-        const alpha = 0.3 + (Math.sin(p.life) * 0.2) + (vMid * 0.5); // Brighter when loud
-        ctx.fillStyle = `rgba(${primaryColor}, ${Math.min(1, alpha)})`;
+        // Draw Particle
+        // Opacity responds to volume
+        const alpha = 0.2 + (v.mid * 0.8) + (Math.sin(p.life + timeRef.current) * 0.1);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${Math.min(1, alpha)})`;
         ctx.beginPath();
-        ctx.arc(x, y, 1.5 + (vBass * 2), 0, Math.PI * 2);
+        ctx.arc(x, y, 1.5 + (v.bass * 3), 0, Math.PI * 2);
         ctx.fill();
 
-        // --- CONNECTING LINES (PLEXUS EFFECT) ---
-        // Only connect if close enough. 
-        // We optimize by checking only a subset of neighbors or relying on the loop order (since they are sorted by angle)
-        // Since they are ordered by angle, p[i] is close to p[i+1]
-        
-        // Connect to next few neighbors
-        for (let j = 1; j <= 4; j++) {
-            const neighborIdx = (i + j) % particleCount;
-            const p2 = particles[neighborIdx];
+        // Connect Lines (Plexus)
+        // Only connect if energy is high enough or idle
+        if (v.volume > 0.05 || state === AgentState.LISTENING) {
+             const neighbor = particles[(i + 1) % particleCount];
+             // Simple approximate neighbor calculation based on ring index
+             // Since they are sorted by angle, i+1 is usually physically close
+             
+             // Calculate neighbor pos
+             const nx = centerX + (Math.cos(neighbor.angle) * (r_dynamic) * horizontalStretch);
+             const ny = centerY + (Math.sin(neighbor.angle) * (r_dynamic) * verticalStretch);
+             
+             const dist = Math.hypot(x - nx, y - ny);
+             
+             // Dynamic connection threshold
+             const connectThresh = 40 + (v.bass * 50);
 
-            // Distance check
-            const dx = x - p2.x;
-            const dy = y - p2.y;
-            const distSq = dx*dx + dy*dy;
-            
-            // Dynamic threshold: Connect further when loud (Bass)
-            const threshold = 1600 + (vBass * 3000); // 40px^2 -> ~60px^2
-
-            if (distSq < threshold) {
-                const dist = Math.sqrt(distSq);
-                const lineAlpha = (1 - dist/Math.sqrt(threshold)) * 0.4;
-                
-                ctx.strokeStyle = `rgba(${secondaryColor}, ${lineAlpha})`;
-                ctx.lineWidth = 0.5 + (vTreble * 1); // Thicker lines on consonants
-                ctx.beginPath();
-                ctx.moveTo(x, y);
-                ctx.lineTo(p2.x, p2.y);
-                ctx.stroke();
-            }
+             if (dist < connectThresh) {
+                 ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha * 0.5})`;
+                 ctx.lineWidth = 0.5 + (v.treble * 1.5);
+                 ctx.beginPath();
+                 ctx.moveTo(x, y);
+                 ctx.lineTo(nx, ny);
+                 ctx.stroke();
+             }
         }
       });
 
-      // --- INNER CORE (The Speaker) ---
-      // A central glow that represents the "throat" or source of energy
-      if (visuals.volume > 0.01 || state === AgentState.LISTENING) {
-          const coreRadius = 20 + (vBass * 50);
-          const coreAlpha = 0.1 + (vBass * 0.4);
+      // --- 6. INNER GLOW (The Core) ---
+      if (v.volume > 0.01 || state === AgentState.LISTENING) {
+          const coreSize = 10 + (v.bass * 60);
+          const coreGradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, coreSize * 2);
+          coreGradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${0.1 + v.bass * 0.4})`);
+          coreGradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
           
-          const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, coreRadius * 2);
-          gradient.addColorStop(0, `rgba(${primaryColor}, ${coreAlpha})`);
-          gradient.addColorStop(1, `rgba(${primaryColor}, 0)`);
-          
-          ctx.fillStyle = gradient;
+          ctx.fillStyle = coreGradient;
           ctx.beginPath();
-          // The core also stretches vertically
-          ctx.ellipse(centerX, centerY, coreRadius * horizontalStretch, coreRadius * verticalStretch, 0, 0, Math.PI * 2);
+          // The core stretches more dramatically
+          ctx.ellipse(centerX, centerY, coreSize * horizontalStretch, coreSize * verticalStretch, 0, 0, Math.PI * 2);
           ctx.fill();
       }
 
@@ -193,26 +216,17 @@ const JarvisFace: React.FC<JarvisFaceProps> = ({ state }) => {
       window.removeEventListener('resize', resize);
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [state]);
+  }, [state, tone]);
 
   return (
     <div className="relative w-full h-full flex items-center justify-center">
-        {/* Decorative Rings */}
-        <div className={`absolute w-72 h-72 rounded-full border border-dashed opacity-10 animate-spin-slow transition-colors duration-500
-            ${state === AgentState.LISTENING ? 'border-cyan-500' : 
-              state === AgentState.ERROR ? 'border-red-500' : 'border-stark-gold'}`}></div>
-        <div className={`absolute w-60 h-60 rounded-full border border-dotted opacity-20 animate-reverse-spin transition-colors duration-500
-            ${state === AgentState.LISTENING ? 'border-cyan-500' : 
-              state === AgentState.ERROR ? 'border-red-500' : 'border-stark-gold'}`} 
-            style={{animationDirection: 'reverse', animationDuration: '15s'}}></div>
-            
-        <canvas ref={canvasRef} className="w-full h-full z-10" />
-        
-        {/* Glow Ambient */}
-        <div className={`absolute w-32 h-32 blur-[60px] opacity-30 rounded-full transition-colors duration-300
+        {/* Ambient Back Glow - Reacts to Tone */}
+        <div className={`absolute w-32 h-32 blur-[80px] opacity-20 rounded-full transition-colors duration-1000
              ${state === AgentState.LISTENING ? 'bg-cyan-500' : 
                state === AgentState.ERROR ? 'bg-red-600' : 
-               state === AgentState.AGENT_PROCESSING ? 'bg-blue-400' : 'bg-stark-gold'}`}></div>
+               tone === 'alert' ? 'bg-orange-500' : 'bg-stark-gold'}`}></div>
+        
+        <canvas ref={canvasRef} className="w-full h-full z-10" />
     </div>
   );
 };
