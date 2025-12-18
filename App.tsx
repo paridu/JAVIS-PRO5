@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
@@ -5,6 +6,7 @@ import Assistant from './pages/Assistant';
 import ChatLog from './pages/ChatLog';
 import MemoryCore from './pages/MemoryCore';
 import SystemConfig from './pages/SystemConfig';
+import IotConfig from './pages/IotConfig';
 import { ROUTES } from './constants';
 
 const App: React.FC = () => {
@@ -16,6 +18,7 @@ const App: React.FC = () => {
           <Route path={ROUTES.CHAT} element={<ChatLog />} />
           <Route path={ROUTES.MEMORY} element={<MemoryCore />} />
           <Route path={ROUTES.SETTINGS} element={<SystemConfig />} />
+          <Route path={ROUTES.IOT_CONFIG} element={<IotConfig />} />
           <Route path="*" element={<Navigate to={ROUTES.HOME} replace />} />
         </Routes>
       </Layout>

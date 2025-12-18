@@ -9,6 +9,24 @@ export enum AgentState {
   AGENT_PROCESSING = 'AGENT_PROCESSING'
 }
 
+export enum IntentionState {
+  IDLE = 'IDLE',
+  MONITOR = 'MONITOR',
+  OPTIMIZE = 'OPTIMIZE',
+  ALERT = 'ALERT',
+  INTERVENE = 'INTERVENE'
+}
+
+export interface IotDevice {
+  id: string;
+  name: string;
+  type: 'light' | 'hvac' | 'security' | 'power' | 'mcu';
+  value: string | number | boolean;
+  status: 'online' | 'offline';
+  lastUpdated: number;
+  connectionType?: 'MQTT' | 'HTTP' | 'Serial';
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'model';
@@ -31,7 +49,6 @@ export interface LiveConfig {
   enableVideo?: boolean;
 }
 
-// Custom Tool Types
 export type ToolName = 
   | 'switch_camera' 
   | 'play_youtube' 
@@ -40,14 +57,15 @@ export type ToolName =
   | 'log_developer_note'
   | 'robotics_scan'
   | 'face_analysis'
-  | 'lightning_agent';
+  | 'lightning_agent'
+  | 'iot_command'
+  | 'get_iot_status';
 
 export interface ToolCallData {
   name: ToolName;
   args: Record<string, any>;
 }
 
-// Memory / Dev Note Types
 export type NoteType = 'BUG_REPORT' | 'FEATURE_REQUEST' | 'GENERAL_LOG';
 
 export interface DevNote {
