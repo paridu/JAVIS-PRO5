@@ -99,7 +99,6 @@ class LiveService {
     this.isMuted = muted;
   }
 
-  // Allow waking up audio context if browser auto-suspends it
   public async resumeAudio() {
     if (this.audioContext && this.audioContext.state === 'suspended') {
       try {
@@ -113,16 +112,23 @@ class LiveService {
 
   private mapError(e: any, context: string): Error {
       console.error(`Error in ${context}:`, e);
-      if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-          return new Error(`ACCESS DENIED: ${context} Restricted`);
+      const name = e.name || '';
+      const message = e.message || '';
+      
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || message.includes('denied')) {
+          const err = new Error(`ACCESS_DENIED: ${context} permission was revoked or blocked by the user.`);
+          (err as any).code = 'PERMISSION_DENIED';
+          return err;
       }
-      if (e.name === 'NotFoundError') {
-          return new Error(`HARDWARE MISSING: ${context} Not Found`);
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+          const err = new Error(`HARDWARE_MISSING: No ${context} device detected on this system.`);
+          (err as any).code = 'NOT_FOUND';
+          return err;
       }
-      if (e.message && e.message.includes('429')) {
-          return new Error("SYSTEM OVERLOAD: Rate Limit Exceeded");
+      if (message.includes('429')) {
+          return new Error("SYSTEM_OVERLOAD: Neural rate limits exceeded.");
       }
-      return new Error(`SYSTEM FAILURE: ${context} Error`);
+      return new Error(`SYSTEM_FAILURE: ${context} initialization failed.`);
   }
 
   public async connect() {
@@ -134,20 +140,15 @@ class LiveService {
       this.client = new GoogleGenAI({ apiKey: process.env.API_KEY });
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
-      // Setup Analyser for Lip Sync
       this.outputAnalyser = this.audioContext.createAnalyser();
       this.outputAnalyser.fftSize = 1024; 
-      // CRITICAL: Set smoothing to 0 to allow UI to handle physics/decay
       this.outputAnalyser.smoothingTimeConstant = 0; 
       this.outputDataArray = new Uint8Array(this.outputAnalyser.frequencyBinCount);
 
       this.outputNode = this.audioContext.createGain();
-      
-      // Route: OutputNode -> Analyser -> Destination
       this.outputNode.connect(this.outputAnalyser);
       this.outputAnalyser.connect(this.audioContext.destination);
 
-      // Get Mic Stream with enhanced error handling
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
@@ -155,7 +156,6 @@ class LiveService {
         throw this.mapError(e, 'Audio Input');
       }
       
-      // Config
       const config = {
         model: MODELS.LIVE,
         callbacks: {
@@ -195,24 +195,18 @@ class LiveService {
 
   private handleOpen(stream: MediaStream) {
     console.log("Live Session Connected");
-    
-    // Setup Audio Input Processing (Mic -> 16kHz PCM -> API)
     const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     this.inputSource = inputCtx.createMediaStreamSource(stream);
     this.processor = inputCtx.createScriptProcessor(4096, 1, 1);
 
     this.processor.onaudioprocess = (e) => {
       if (this.isMuted) return;
-
       const inputData = e.inputBuffer.getChannelData(0);
-      
-      // Calculate Volume for Visualizer
       let sum = 0;
       for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
       const vol = Math.sqrt(sum / inputData.length);
-      if (this.onVolumeChange) this.onVolumeChange(vol * 500); // Scale up for UI
+      if (this.onVolumeChange) this.onVolumeChange(vol * 500); 
 
-      // Send to API
       const pcmBlob = createPCMBlob(inputData, 16000);
       this.sessionPromise?.then(session => {
         session.sendRealtimeInput({ media: pcmBlob });
@@ -223,8 +217,16 @@ class LiveService {
     this.processor.connect(inputCtx.destination);
   }
 
+  public sendTextMessage(text: string) {
+    this.sessionPromise?.then(session => {
+      // Correct method for sending text content in Live API sessions is 'send'
+      session.send({
+        parts: [{ text }],
+      });
+    });
+  }
+
   private async handleMessage(message: LiveServerMessage) {
-    // 1. Handle Audio Output (Server -> User)
     const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (audioData && this.audioContext) {
       const float32 = base64ToFloat32Array(audioData);
@@ -233,9 +235,8 @@ class LiveService {
 
       const source = this.audioContext.createBufferSource();
       source.buffer = buffer;
-      source.connect(this.outputNode!); // Connect to outputNode which now feeds into Analyser
+      source.connect(this.outputNode!); 
 
-      // Audio Scheduling
       this.nextStartTime = Math.max(this.audioContext.currentTime, this.nextStartTime);
       source.start(this.nextStartTime);
       this.nextStartTime += buffer.duration;
@@ -244,7 +245,6 @@ class LiveService {
       source.onended = () => this.scheduledSources.delete(source);
     }
 
-    // 2. Handle Transcription
     if (message.serverContent?.outputTranscription?.text) {
       this.onTranscript?.(message.serverContent.outputTranscription.text, 'model');
     }
@@ -252,36 +252,24 @@ class LiveService {
       this.onTranscript?.(message.serverContent.inputTranscription.text, 'user');
     }
 
-    // 3. Handle Interrupts
     if (message.serverContent?.interrupted) {
       this.clearAudioQueue();
     }
 
-    // 4. Handle Tool Calls
     if (message.toolCall) {
       for (const call of message.toolCall.functionCalls) {
-        console.log("Tool Call:", call.name, call.args);
-        
         let result = { result: "ok" };
         if (this.onToolCall) {
           try {
-             // Execute client-side tool logic
              const customResult = await this.onToolCall({ name: call.name as any, args: call.args as any });
              if (customResult) result = customResult;
           } catch (e) {
-             console.error("Tool execution error", e);
              result = { error: "Tool execution failed" } as any;
           }
         }
-
-        // Send Response back to model
         this.sessionPromise?.then(session => {
           session.sendToolResponse({
-            functionResponses: {
-              id: call.id,
-              name: call.name,
-              response: result
-            }
+            functionResponses: { id: call.id, name: call.name, response: result }
           });
         });
       }
@@ -291,10 +279,7 @@ class LiveService {
   public sendVideoFrame(base64Data: string) {
     this.sessionPromise?.then(session => {
       session.sendRealtimeInput({
-        media: {
-          mimeType: 'image/jpeg',
-          data: base64Data
-        }
+        media: { mimeType: 'image/jpeg', data: base64Data }
       });
     });
   }
@@ -311,11 +296,8 @@ class LiveService {
     this.inputSource?.disconnect();
     this.processor?.disconnect();
     this.clearAudioQueue();
-    // Ensure all references are cleared so re-connect works cleanly
     this.sessionPromise = null;
     this.client = null;
-    
-    // Notify State
     if (this.onStateChange) this.onStateChange(false);
   }
 
@@ -323,14 +305,11 @@ class LiveService {
     if (!this.outputAnalyser || !this.outputDataArray || !this.audioContext) {
         return { volume: 0, bass: 0, mid: 0, treble: 0 };
     }
-    
     this.outputAnalyser.getByteFrequencyData(this.outputDataArray);
-    
     const sampleRate = this.audioContext.sampleRate;
     const binCount = this.outputAnalyser.frequencyBinCount;
     const freqPerBin = (sampleRate / 2) / binCount;
 
-    // Helper to extract energy from a specific frequency range
     const getEnergy = (lowFreq: number, highFreq: number) => {
         const startBin = Math.floor(lowFreq / freqPerBin);
         const endBin = Math.floor(highFreq / freqPerBin);
@@ -343,17 +322,9 @@ class LiveService {
         return count > 0 ? (sum / count) / 255 : 0;
     };
 
-    // Range Definitions for Phonemes
-    // Bass (50-300Hz): Fundamental frequency. Drives Vowels (A, O, U) -> Open Mouth / Vertical Stretch
     const bass = getEnergy(50, 300);
-    
-    // Mid (300-2000Hz): Formants. Drives Tone/Intensity -> General Activity
     const mid = getEnergy(300, 2000);
-    
-    // Treble (2000Hz+): Sibilance/Fricatives. Drives Consonants (S, T, Ch) -> Jitter / Horizontal Shake
     const treble = getEnergy(2000, 8000);
-
-    // Overall RMS Volume
     let totalSum = 0;
     for(let i=0; i<binCount; i++) totalSum += this.outputDataArray[i];
     const volume = (totalSum / binCount) / 255;
