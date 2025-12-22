@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import JarvisFace from '../components/JarvisFace';
 import { liveService } from '../services/liveService';
@@ -16,16 +15,15 @@ const Assistant: React.FC = () => {
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [roboticsData, setRoboticsData] = useState<any>(null);
   const [agentReport, setAgentReport] = useState<string | null>(null);
-  const [faceData, setFaceData] = useState<any>(null);
-  const [isFaceLocked, setIsFaceLocked] = useState(false);
   const [isVideoActive, setIsVideoActive] = useState(false);
-  const [isLogging, setIsLogging] = useState(false); 
-  const [liveVolume, setLiveVolume] = useState(0);
-  const [isMirrored, setIsMirrored] = useState(true); 
-  const [showControls, setShowControls] = useState(false);
   const [activeFeature, setActiveFeature] = useState<string | null>(null);
-  const [accessErrorCode, setAccessErrorCode] = useState<string | null>(null);
   const [iotDevices, setIotDevices] = useState<IotDevice[]>([]);
+  const [showControls, setShowControls] = useState(false);
+  const [isMirrored, setIsMirrored] = useState(true);
+
+  // Music Player State (InnerTune Inspired)
+  const [youtubeQuery, setYoutubeQuery] = useState<string | null>(null);
+  const [isMusicPlaying, setIsMusicPlaying] = useState(false);
 
   const stateRef = useRef(state);
   const isInitializedRef = useRef(isInitialized);
@@ -43,16 +41,13 @@ const Assistant: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    // Dynamic HUD logic
-    if (isLogging) setActiveFeature("MEMORY WRITE PROTOCOL");
-    else if (state === AgentState.AGENT_PROCESSING) setActiveFeature("LIGHTNING AGENT");
+    if (state === AgentState.AGENT_PROCESSING) setActiveFeature("LIGHTNING AGENT");
     else if (state === AgentState.THINKING) setActiveFeature("NEURAL PROCESSING");
-    else if (isFaceLocked) setActiveFeature("BIOMETRIC TRACKING");
-    else if (generatedImage) setActiveFeature("VISUAL SYNTHESIS");
+    else if (youtubeQuery) setActiveFeature("MEDIA STREAMING");
     else if (roboticsData) setActiveFeature("ENVIRONMENTAL SENSORS");
     else if (state === AgentState.ERROR) setActiveFeature("SYSTEM ERROR");
     else setActiveFeature(null);
-  }, [state, isFaceLocked, generatedImage, roboticsData, isLogging]);
+  }, [state, youtubeQuery, roboticsData]);
 
   useEffect(() => {
     handleSystemStart();
@@ -147,12 +142,8 @@ const Assistant: React.FC = () => {
     };
 
     liveService.onError = (error) => {
-        const errorMsg = error.message || "Unknown Failure";
-        const code = (error as any).code;
-        setLastTranscript(`ERROR: ${errorMsg}`);
+        setLastTranscript(`ERROR: ${error.message || "Unknown Failure"}`);
         setState(AgentState.ERROR);
-        if (code === 'PERMISSION_DENIED') setAccessErrorCode('PERMISSION_DENIED');
-        else if (code === 'NOT_FOUND') setAccessErrorCode('HARDWARE_MISSING');
     };
 
     liveService.onTranscript = (text, type) => {
@@ -164,7 +155,6 @@ const Assistant: React.FC = () => {
     };
 
     liveService.onVolumeChange = (vol) => {
-       setLiveVolume(vol);
        if (vol > 10 && ![AgentState.SPEAKING, AgentState.THINKING, AgentState.ERROR, AgentState.AGENT_PROCESSING].includes(stateRef.current)) {
            setState(AgentState.LISTENING);
        } else if (vol <= 10 && stateRef.current === AgentState.LISTENING) {
@@ -173,9 +163,14 @@ const Assistant: React.FC = () => {
     };
 
     liveService.onToolCall = async (tool: ToolCallData) => {
-      setLastTranscript(`IOT PROTOCOL: ${tool.name.toUpperCase()}`);
+      setLastTranscript(`PROTOCOL: ${tool.name.toUpperCase()}`);
       try {
           switch (tool.name) {
+              case 'play_youtube': {
+                  setYoutubeQuery(tool.args.query);
+                  setIsMusicPlaying(true);
+                  return { result: `Streaming protocol initiated for: ${tool.args.query}` };
+              }
               case 'iot_command': {
                   setIntention(IntentionState.INTERVENE);
                   const result = iotService.command(tool.args.device, tool.args.value);
@@ -184,7 +179,6 @@ const Assistant: React.FC = () => {
                   return result ? { result: `Success: ${tool.args.device} set to ${tool.args.value}` } : { error: "Device not found" };
               }
               case 'get_iot_status': {
-                  setIntention(IntentionState.MONITOR);
                   return { result: iotService.getStatusSummary() };
               }
               case 'switch_camera':
@@ -198,14 +192,6 @@ const Assistant: React.FC = () => {
                   setRoboticsData(json);
                   return { result: "Scan complete", data: json };
               }
-              case 'lightning_agent': {
-                   setState(AgentState.AGENT_PROCESSING);
-                   const frame = getCurrentFrame() || undefined; 
-                   const report = await geminiService.runLightningAgent(tool.args.task, frame);
-                   setAgentReport(report);
-                   setState(AgentState.IDLE);
-                   return { result: "Report generated" };
-              }
               default:
                   return { result: "Executed" };
           }
@@ -218,7 +204,6 @@ const Assistant: React.FC = () => {
 
   const handleSystemStart = async () => {
     isExplicitShutdownRef.current = false;
-    setAccessErrorCode(null);
     setLastTranscript("LINKING TO IOT HUB...");
     try {
         setState(AgentState.CONNECTING);
@@ -227,7 +212,7 @@ const Assistant: React.FC = () => {
         if (!isVideoActive) await startVideo();
         setState(AgentState.IDLE);
         setIntention(IntentionState.MONITOR);
-        liveService.playGreeting("สวัสดีครับ ผมจาร์วิส ระบบ Edge AI ประจำบ้านพร้อมปฏิบัติการแล้วครับ");
+        liveService.playGreeting("สวัสดีครับ ผมจาร์วิส ระบบ Edge AI พร้อมเชื่อมต่อมัลติมีเดียและ IoT แล้วครับ");
     } catch (e: any) {
         setState(AgentState.ERROR);
     }
@@ -254,30 +239,68 @@ const Assistant: React.FC = () => {
           </div>
       )}
 
-      {/* IoT Tactical HUD */}
-      <div className="absolute top-20 left-6 z-40 hidden lg:flex flex-col gap-3 pointer-events-none">
-          <div className="bg-black/60 border-l-2 border-cyan-500 p-3 backdrop-blur-md">
-              <span className="text-[10px] text-cyan-500 block font-bold tracking-widest mb-2">IOT SENSOR ARRAY</span>
-              <div className="space-y-2">
-                  {iotDevices.map(d => (
-                      <div key={d.id} className="flex items-center justify-between gap-8">
-                          <span className="text-[10px] text-stark-400 uppercase">{d.name}</span>
-                          <span className={`text-[10px] font-bold ${d.value === true || d.value === 'LOCKED' ? 'text-green-400' : 'text-stark-gold'}`}>
-                              {d.value === true ? 'ON' : d.value === false ? 'OFF' : d.value}
-                          </span>
-                      </div>
-                  ))}
-              </div>
-          </div>
-          <div className="bg-black/60 border-l-2 border-stark-gold p-3 backdrop-blur-md">
-              <span className="text-[10px] text-stark-gold block font-bold tracking-widest mb-1">AGENT INTENTION</span>
-              <span className="text-xs text-white font-mono animate-pulse">{intention}</span>
-          </div>
-      </div>
+      {/* Music Player HUD (InnerTune Inspired) */}
+      {youtubeQuery && (
+        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-[70] w-[90vw] max-w-md pointer-events-auto">
+            <div className="bg-black/80 backdrop-blur-2xl border border-stark-gold/30 rounded-3xl p-6 shadow-[0_20px_50px_rgba(0,0,0,0.5)] overflow-hidden relative">
+                <button 
+                    onClick={() => setYoutubeQuery(null)}
+                    className="absolute top-4 right-4 text-stark-600 hover:text-white transition-colors"
+                >
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+                
+                <div className="flex items-center gap-6">
+                    <div className="w-24 h-24 bg-gradient-to-tr from-stark-gold/20 to-cyan-500/20 rounded-2xl flex items-center justify-center border border-white/10 relative overflow-hidden group">
+                        <div className="absolute inset-0 bg-stark-gold/5 animate-pulse"></div>
+                        <svg className="w-12 h-12 text-stark-gold relative z-10" fill="currentColor" viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <h4 className="text-white font-bold text-lg truncate uppercase tracking-tight">{youtubeQuery}</h4>
+                        <p className="text-stark-500 text-xs font-mono uppercase tracking-widest mt-1">Stark Media Stream</p>
+                    </div>
+                </div>
+
+                <div className="mt-6 space-y-4">
+                    {/* Progress Bar */}
+                    <div className="relative h-1 bg-white/10 rounded-full overflow-hidden">
+                        <div className="absolute h-full bg-stark-gold animate-[progress_30s_linear_infinite]" style={{ width: '0%' }}></div>
+                    </div>
+                    
+                    <div className="flex justify-between text-[10px] text-stark-600 font-mono">
+                        <span>0:42</span>
+                        <span>3:15</span>
+                    </div>
+
+                    <div className="flex items-center justify-center gap-10">
+                        <button className="text-white/60 hover:text-white transition-colors"><svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
+                        <button 
+                            onClick={() => setIsMusicPlaying(!isMusicPlaying)}
+                            className="w-14 h-14 bg-white text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all"
+                        >
+                            {isMusicPlaying ? (
+                                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                            ) : (
+                                <svg className="w-6 h-6 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                            )}
+                        </button>
+                        <button className="text-white/60 hover:text-white transition-colors"><svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+                    </div>
+                </div>
+
+                {/* Hidden YouTube Search Embed Link (Simulated for compliance) */}
+                <iframe 
+                    className="hidden" 
+                    src={`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(youtubeQuery)}&autoplay=1`}
+                    title="YouTube music player"
+                ></iframe>
+            </div>
+        </div>
+      )}
 
       {/* Main UI Layer */}
       <div className="flex-1 flex flex-col items-center justify-center relative z-10 pointer-events-none mb-32">
-        <div className="w-[85vw] max-w-[420px] aspect-square relative pointer-events-auto">
+        <div className="w-[85vw] max-w-[400px] aspect-square relative pointer-events-auto">
              <JarvisFace state={state} tone={JARVIS_PERSONA.tone} />
              <div className={`absolute inset-0 rounded-full border-2 transition-all duration-1000 opacity-20 scale-110
                  ${intention === IntentionState.INTERVENE ? 'border-red-500 animate-ping' : 
@@ -286,8 +309,8 @@ const Assistant: React.FC = () => {
         </div>
 
         <div className="mt-6 text-center px-6 max-w-3xl min-h-[60px] pointer-events-auto">
-           <p className={`font-mono text-sm md:text-lg tracking-widest transition-colors duration-300 ${
-               state === AgentState.SPEAKING ? 'text-stark-gold font-bold' : 'text-stark-500'
+           <p className={`font-mono text-sm md:text-lg tracking-[0.2em] transition-colors duration-300 uppercase ${
+               state === AgentState.SPEAKING ? 'text-stark-gold font-bold' : 'text-stark-500/60'
            }`}>
              {lastTranscript}
            </p>
@@ -296,14 +319,12 @@ const Assistant: React.FC = () => {
 
       {/* Optimized Mobile Control Panel */}
       <div className="fixed bottom-20 md:bottom-24 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2 pointer-events-none">
-          {/* Collapsible Tactical Panel */}
           <div className={`flex flex-wrap justify-center gap-2 p-3 bg-black/80 backdrop-blur-xl border border-stark-800 rounded-2xl shadow-2xl transition-all duration-500 origin-bottom pointer-events-auto ${showControls ? 'scale-100 opacity-100' : 'scale-0 opacity-0 pointer-events-none h-0 p-0 overflow-hidden'}`}>
-              <button onClick={handleCameraSwitch} className="px-3 py-1.5 bg-stark-900 border border-cyan-500/30 text-cyan-400 text-[9px] font-bold tracking-widest uppercase rounded hover:bg-cyan-500 hover:text-black">Switch Cam</button>
-              <button onClick={() => setRoboticsData(null)} className="px-3 py-1.5 bg-stark-900 border border-stark-gold/30 text-stark-gold text-[9px] font-bold tracking-widest uppercase rounded hover:bg-stark-gold hover:text-black">Reset HUD</button>
-              <button onClick={() => { liveService.disconnect(); setIsInitialized(false); }} className="px-3 py-1.5 bg-red-950/20 border border-red-500/30 text-red-500 text-[9px] font-bold tracking-widest uppercase rounded hover:bg-red-500 hover:text-white">Shutdown</button>
+              <button onClick={handleCameraSwitch} className="px-3 py-1.5 bg-stark-900 border border-cyan-500/30 text-cyan-400 text-[9px] font-bold tracking-widest uppercase rounded">Switch Cam</button>
+              <button onClick={() => { setYoutubeQuery(null); setRoboticsData(null); }} className="px-3 py-1.5 bg-stark-900 border border-stark-gold/30 text-stark-gold text-[9px] font-bold tracking-widest uppercase rounded">Reset HUD</button>
+              <button onClick={() => { liveService.disconnect(); setIsInitialized(false); }} className="px-3 py-1.5 bg-red-950/20 border border-red-500/30 text-red-500 text-[9px] font-bold tracking-widest uppercase rounded">Shutdown</button>
           </div>
 
-          {/* Toggle / Main Action Button */}
           <div className="flex items-center gap-3 pointer-events-auto">
              {!isInitialized ? (
                 <button onClick={handleSystemStart} className="px-8 py-2.5 bg-stark-gold text-black text-xs font-bold tracking-[0.3em] rounded-full shadow-[0_0_20px_rgba(251,191,36,0.4)] animate-pulse uppercase">Establish Link</button>
@@ -319,6 +340,13 @@ const Assistant: React.FC = () => {
              )}
           </div>
       </div>
+
+      <style>{`
+        @keyframes progress {
+            from { width: 0%; }
+            to { width: 100%; }
+        }
+      `}</style>
     </div>
   );
 };

@@ -10,11 +10,21 @@ const TOOLS: FunctionDeclaration[] = [
     parameters: { type: Type.OBJECT, properties: {} }
   },
   {
-    name: 'iot_command',
-    description: 'Send command to IoT device. Use device name or ID (Main Lighting, Climate Control, etc.) and a value.',
+    name: 'play_youtube',
+    description: 'Play a music video or song from YouTube. Provide a search query or song title.',
     parameters: {
       type: Type.OBJECT,
       properties: {
+        query: { type: Type.STRING, description: 'The song title or search query' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'iot_command',
+    description: 'Send command to IoT device. Use device name or ID (Main Lighting, Climate Control, etc.) and a value.',
+    parameters: {
+      type: Type.OBJECT, properties: {
         device: { type: Type.STRING, description: 'Name or ID of the device' },
         value: { type: Type.STRING, description: 'New value (e.g., true/false for lights, number for temperature)' }
       },
